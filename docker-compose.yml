@@ -13,7 +13,7 @@ services:
     environment:
       # 重要提示：在此处设置一个强大、唯一的密钥！
       # 使用以下命令生成：python -c 'import os; print(os.urandom(24).hex())'
-      - FLASK_SECRET_KEY=aBcDeFgHiJkLmNoPqRsTuVwXyZ0025410 # 示例: 3a9f8b2d.... (请务必替换！)
+      - FLASK_SECRET_KEY=replace_this_with_a_real_secret_key_32_chars_or_more # 示例: 3a9f8b2d.... (请务必替换！)
       - FLASK_ENV=production # 确保 Flask 以生产模式运行
       # 如果需要，可以在此处添加其他环境变量
     restart: unless-stopped # 重启策略
