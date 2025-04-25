@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>使用 JSESSIONID 登录</h2> <p>请在登录官方 NBU 考勤网站后，从浏览器的开发者工具中获取您的 JSESSIONID Cookie 值。</p> <form method="POST" action="{{ url_for('login') }}">
+    <div class="form-group">
+        <label for="jsessionid">JSESSIONID:</label>
+        <input type="text" id="jsessionid" name="jsessionid" required placeholder="输入您的 JSESSIONID Cookie 值"> </div>
+    <button type="submit" class="btn">登录</button> </form>
+{% endblock %}
