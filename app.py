@@ -6,161 +6,198 @@ from attendance_logic import get_courses, run_brute_force_sign_in, run_single_si
 
 app = Flask(__name__)
 # 重要提示：为生产环境设置一个强密钥！
-# 可以使用以下命令生成：python -c 'import os; print(os.urandom(24))'
-# 对于 Docker，最好通过环境变量设置。
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'dev-secret-key-replace-this!')
 
-# 临时将会话中获取的课程存储起来
-# 注意：如果课程非常多，会话大小限制可能成为问题，但对于此规模来说还好。
 SESSION_COURSES_KEY = 'current_courses'
 
 @app.route('/', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        jsessionid = request.form.get('jsessionid', '').strip()
-        if not jsessionid:
-            flash('JSESSIONID 不能为空。', 'error') # 改为中文
+        jsessionid_input = request.form.get('jsessionid', '').strip()
+        if not jsessionid_input:
+            flash('JSESSIONID 不能为空。', 'error')
+            # 重定向回 GET 请求，显示登录页和 flash 消息
             return redirect(url_for('login'))
 
-        # 将 cookie 存储在 session 中
-        session['jsessionid'] = jsessionid
-        session.pop(SESSION_COURSES_KEY, None) # 新登录时清除旧课程
-        flash('登录成功。正在获取课程...', 'success') # 改为中文
-        # 重定向到 dashboard，它将获取课程
-        return redirect(url_for('dashboard'))
+        # --- 新增：在登录时立即尝试验证 JSESSIONID ---
+        print(f"尝试使用 JSESSIONID 验证登录: {jsessionid_input[:10]}...") # 打印部分ID用于调试
+        validation_result = get_courses(jsessionid_input)
 
-    # 如果已登录，重定向到 dashboard
+        if validation_result['success']:
+            # 验证成功 (即使没有课程，只要 API 调用成功且 cookie 有效)
+            session['jsessionid'] = jsessionid_input
+            # 缓存获取到的课程数据
+            session[SESSION_COURSES_KEY] = validation_result.get('courses', [])
+            flash('登录成功！', 'success') # 更新成功消息
+            if not validation_result.get('courses'):
+                flash('今天似乎没有课程安排。', 'info') # 如果成功但没课程，也提示一下
+
+            return redirect(url_for('dashboard'))
+        else:
+            # 验证失败
+            error_message = validation_result.get('error', '未知错误')
+            print(f"JSESSIONID 验证失败: {error_message}") # 打印错误日志
+
+            # 根据错误类型显示不同的 flash 消息
+            # 修改这里的判断条件以匹配 get_courses 中返回的特定错误消息
+            if "无效的 JSESSIONID" in error_message or "请登录" in error_message or "Invalid JSESSIONID" in error_message:
+                 flash('登录失败：JSESSIONID 无效或已过期，请检查后重新输入。', 'error')
+            elif "网络请求失败" in error_message:
+                 flash(f'登录验证失败：无法连接到服务器。请检查网络连接。({error_message})', 'error')
+            else:
+                 flash(f'登录验证失败：{error_message}', 'error')
+
+            # 不设置 session，不重定向，停留在登录页显示错误
+            # 需要确保 login.html 能正确显示 flash 消息
+            return render_template('login.html')
+
+    # --- GET 请求部分 ---
+    # 如果 session 中已有有效的 jsessionid，直接重定向到 dashboard
     if 'jsessionid' in session:
+        # （可选）可以加一步验证，确保 session 中的 ID 仍然有效，但这会增加每次访问的开销
+        # 如果不加验证，用户可能会看到 dashboard，然后在刷新或操作时才发现 cookie 过期
         return redirect(url_for('dashboard'))
 
+    # 显示登录页面 (处理 GET 请求，或者 POST 验证失败后重新渲染)
     return render_template('login.html')
 
+# --- dashboard, refresh_courses, signin, logout 函数保持不变 ---
+# (请确保这些函数在 app.py 文件中仍然存在且内容正确)
 @app.route('/dashboard')
 def dashboard():
     if 'jsessionid' not in session:
-        flash('请先登录。', 'error') # 改为中文
+        flash('请先登录。', 'error')
         return redirect(url_for('login'))
 
     jsessionid_cookie = session['jsessionid']
-    # 首先尝试从 session 缓存中获取课程
     courses_data = session.get(SESSION_COURSES_KEY)
 
-    if not courses_data: # 如果未缓存，则获取它们
-        print("正在从 API 获取课程...") # 改为中文
+    # 如果 session 中没有课程缓存 (例如，session 过期后重新打开，或者直接访问 dashboard)
+    # 或者用户点击了刷新按钮（虽然刷新逻辑在 refresh_courses 中处理，但以防万一）
+    # 则尝试重新获取课程
+    if courses_data is None: # 使用 is None 检查缓存是否存在，空列表 [] 是有效缓存
+        print("缓存未命中或需要刷新，正在从 API 获取课程...")
         result = get_courses(jsessionid_cookie)
         if result['success']:
             courses_data = result['courses']
-            session[SESSION_COURSES_KEY] = courses_data # 缓存结果
+            session[SESSION_COURSES_KEY] = courses_data # 更新缓存
             if not courses_data:
-                 flash(result.get('message', '今天没有找到课程。'), 'info') # 改为中文
+                 flash(result.get('message', '今天没有找到课程。'), 'info')
         else:
-            flash(f"获取课程时出错: {result['error']}", 'error') # 改为中文
-            # 如果 cookie 无效，则将用户登出
-            if "无效的 JSESSIONID" in result.get('error', ''): # 改为中文
+            flash(f"获取课程时出错: {result['error']}", 'error')
+            if "无效的 JSESSIONID" in result.get('error', ''):
+                 # 如果在这里发现 cookie 失效，登出用户
                  return redirect(url_for('logout'))
-            courses_data = [] # 确保 dashboard 在没有课程的情况下呈现
-            session.pop(SESSION_COURSES_KEY, None) # 清除无效缓存
+            courses_data = [] # 出错时显示空列表
+            session.pop(SESSION_COURSES_KEY, None) # 清除可能无效的缓存
 
-    # 如果没有课程数据，则传递 flash 消息给模板
-    message_to_render = None
-    if not courses_data and get_flashed_messages():
-         # 如果没有课程且有 flash 消息，让模板处理 flash
-         pass
-    elif not courses_data:
-        # 如果没有课程且没有 flash 消息（可能是第一次加载或刷新后）
-        message_to_render = "目前没有可显示的课程，或需要刷新。" # 添加一个默认消息
+    # (此处省略了之前 dashboard 中用于处理无课程时 message 的逻辑，因为 flash 更常用)
+    # 如果 courses_data 仍然是 None (例如获取失败且未被设置为空列表)，确保模板能处理
+    if courses_data is None:
+        courses_data = []
 
-    return render_template('dashboard.html', courses=courses_data, message=message_to_render)
+    return render_template('dashboard.html', courses=courses_data)
+
 
 @app.route('/refresh')
 def refresh_courses():
     if 'jsessionid' not in session:
         return redirect(url_for('login'))
-
-    # 清除 session 中的课程缓存
     session.pop(SESSION_COURSES_KEY, None)
-    flash('课程列表缓存已清除。正在刷新...', 'info') # 改为中文
+    flash('课程列表已刷新。', 'info') # 更新提示信息
     return redirect(url_for('dashboard'))
 
 
 @app.route('/signin', methods=['POST'])
 def signin():
     if 'jsessionid' not in session:
-        flash('会话已过期。请重新登录。', 'error') # 改为中文
+        flash('会话已过期。请重新登录。', 'error')
         return redirect(url_for('login'))
 
     jsessionid_cookie = session['jsessionid']
+    # 从 session 获取课程数据，确保后续操作基于这个数据
     courses = session.get(SESSION_COURSES_KEY)
 
-    if not courses:
-        flash('Session 中缺少课程数据。请刷新仪表盘。', 'error') # 改为中文
+    # 检查 courses 是否存在且不为 None
+    if courses is None:
+        flash('课程数据丢失，请尝试刷新页面。', 'error')
         return redirect(url_for('dashboard'))
 
     selected_course_ui_id = request.form.get('selected_course')
     action_type = request.form.get('action_type')
 
     if not selected_course_ui_id:
-        flash('未选择课程。', 'error') # 改为中文
+        flash('未选择课程。', 'error')
         return redirect(url_for('dashboard'))
 
-    # 使用隐藏字段或通过搜索课程列表找到所选课程的详细信息
-    # 使用隐藏字段在 session 数据过时的情况下不太健壮，但在这里更简单。
-    # course_plan_id = request.form.get(f'{selected_course_ui_id}_plan_id')
-    # attendance_id = request.form.get(f'{selected_course_ui_id}_att_id')
-
-    # 备选方案：在 session 数据中查找课程（更健壮）
+    # 在 session 缓存的 courses 中查找选中的课程
     selected_course = next((c for c in courses if c.get('ui_id') == selected_course_ui_id), None)
 
     if not selected_course:
-         flash('在 Session 数据中找不到所选课程。请刷新。', 'error') # 改为中文
+         flash('选择的课程无效或数据已过期，请刷新。', 'error')
          return redirect(url_for('dashboard'))
 
     course_plan_id = selected_course.get('coursePlanId')
     attendance_id = selected_course.get('attendanceId')
-    course_name = selected_course.get('courseName', '未知课程') # 改为中文
-
+    course_name = selected_course.get('courseName', '未知课程')
 
     if not course_plan_id or not attendance_id:
-        flash(f'无法为“{course_name}”签到。签到可能尚未开始（缺少 Plan ID 或 Attendance ID）。请刷新。', 'error') # 改为中文
+        flash(f'无法为“{course_name}”签到。签到可能尚未开始 (缺少 Plan ID 或 Attendance ID)。请刷新。', 'error')
         return redirect(url_for('dashboard'))
 
     result = None
-    if action_type == 'brute_force':
-        flash(f'开始为“{course_name}”进行暴力破解签到。这可能需要时间...', 'info') # 改为中文
-        print(f"开始暴力破解 - 课程: {course_name}, PlanID: {course_plan_id}, AttID: {attendance_id}") # 改为中文
-        # 运行调用异步代码的同步包装器
-        result = run_brute_force_sign_in(jsessionid_cookie, course_plan_id, attendance_id)
+    print(f"收到签到请求 - 课程: {course_name}, 类型: {action_type}") # 添加日志
 
-    elif action_type == 'manual':
-        manual_code = request.form.get('manual_code', '').strip()
-        if not manual_code.isdigit() or not (0 <= int(manual_code) <= 9999):
-             flash('输入的手动签到码无效。必须是 0000-9999。', 'error') # 改为中文
-             return redirect(url_for('dashboard'))
+    try: # 包裹签到逻辑调用，捕获意外错误
+        if action_type == 'brute_force':
+            flash(f'开始为“{course_name}”进行暴力破解签到。这可能需要时间...', 'info')
+            print(f"开始暴力破解 - PlanID: {course_plan_id}, AttID: {attendance_id}")
+            result = run_brute_force_sign_in(jsessionid_cookie, course_plan_id, attendance_id)
 
-        # 格式化为4位，前面补零
-        manual_code_formatted = f"{int(manual_code):04d}"
-        flash(f'尝试使用签到码 {manual_code_formatted} 为“{course_name}”签到...', 'info') # 改为中文
-        print(f"开始手动签到 - 课程: {course_name}, PlanID: {course_plan_id}, AttID: {attendance_id}, 签到码: {manual_code_formatted}") # 改为中文
-        result = run_single_sign_in(jsessionid_cookie, course_plan_id, attendance_id, manual_code_formatted) # 传递格式化后的
+        elif action_type == 'manual':
+            manual_code = request.form.get('manual_code', '').strip()
+            # 验证签到码格式
+            try:
+                code_int = int(manual_code)
+                if not (0 <= code_int <= 9999):
+                    raise ValueError("签到码必须在 0 到 9999 之间。")
+                manual_code_formatted = f"{code_int:04d}" # 格式化为四位
+            except ValueError:
+                 flash('输入的签到码无效。必须是 0000 到 9999 之间的数字。', 'error')
+                 return redirect(url_for('dashboard'))
 
-    else:
-        flash('选择了无效的操作。', 'error') # 改为中文
+            flash(f'尝试使用签到码 {manual_code_formatted} 为“{course_name}”签到...', 'info')
+            print(f"开始手动签到 - PlanID: {course_plan_id}, AttID: {attendance_id}, Code: {manual_code_formatted}")
+            result = run_single_sign_in(jsessionid_cookie, course_plan_id, attendance_id, manual_code_formatted)
+
+        else:
+            flash('选择了无效的操作。', 'error')
+            return redirect(url_for('dashboard'))
+
+    except Exception as e:
+        # 捕获签到逻辑中的意外错误
+        print(f"执行签到操作时发生意外错误: {e}")
+        flash(f"执行签到操作时发生内部错误: {e}", 'error')
         return redirect(url_for('dashboard'))
 
-    # 处理结果
+
+    # 处理签到结果
     if result:
+        print(f"签到操作完成 - 结果: {result}") # 添加日志
         if result['success']:
-            flash(f"“{course_name}”成功: {result['message']}", 'success') # 改为中文
-            # 可选：如果需要，在成功签到后清除课程缓存
+            flash(f"“{course_name}”签到成功: {result['message']}", 'success')
+            # 成功后，可以选择性地清除课程缓存以强制下次刷新，或者保留缓存
             # session.pop(SESSION_COURSES_KEY, None)
         else:
-            flash(f"“{course_name}”失败: {result['error']}", 'error') # 改为中文
+            flash(f"“{course_name}”签到失败: {result['error']}", 'error')
             attempts = result.get('attempts')
             if attempts is not None:
-                 flash(f"总尝试次数: {attempts}", 'info') # 改为中文
+                 flash(f"总尝试次数: {attempts}", 'info')
+    else:
+        # 如果 result 为 None (理论上不应发生，除非上面逻辑有误)
+        flash("签到操作未返回有效结果。", 'warning')
 
 
-    # 重定向回 dashboard 以显示状态
     return redirect(url_for('dashboard'))
 
 
@@ -168,10 +205,8 @@ def signin():
 def logout():
     session.pop('jsessionid', None)
     session.pop(SESSION_COURSES_KEY, None)
-    flash('您已成功登出。', 'success') # 改为中文
+    flash('您已成功登出。', 'success')
     return redirect(url_for('login'))
 
-# --- 主执行 ---
-# 在生产环境中使用 Gunicorn 或其他 WSGI 服务器（在 Dockerfile/docker-compose 中定义）
-# if __name__ == '__main__':
-#     app.run(debug=True, host='0.0.0.0') # 用于本地无 Docker 测试
+# --- Main execution ---
+# ( Gunicorn in Docker runs this part, no need for __main__ block usually )
